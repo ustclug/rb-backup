@@ -5,7 +5,16 @@ set -e
 BASEDIR="$(readlink -f $(dirname "$0"))"
 PROFILE="$1"
 EPOCH=$(date +%s)
-readonly BASEDIR PROFILE EPOCH
+
+if [[ $(whoami) != 'root' ]]; then
+    BTRFS='sudo btrfs'
+    RSYNC='sudo rsync'
+else
+    BTRFS='btrfs'
+    RSYNC='sync'
+fi
+
+readonly BASEDIR PROFILE EPOCH BTRFS RSYNC
 
 # log-related functions {{{
 log () {
@@ -34,12 +43,12 @@ check_subvolume () {
     local subvol=$1
 
     if [ -d "$subvol" ]; then
-        btrfs subvol show $subvol >/dev/null 2>&1
+        $BTRFS subvol show $subvol >/dev/null 2>&1
         if [ $? -ne 0 ]; then
             panick "$subvol exist but not a btrfs subvolume!"
         fi
     else
-        btrfs subvolume create $subvol \
+        $BTRFS subvol create $subvol \
             || panick "Failed to create subvolume $subvol"
     fi
 }
@@ -99,8 +108,6 @@ check_and_prepare () {
     # SSH key must be provided to login remote
     [ -f "${conf["SSH_KEY"]}" ] || panick "SSH key not found!"
 
-    # must be root to continue
-    [[ $(whoami) != 'root' ]] && panick "Please run as root!"
 
     if [[ $(stat -f -c %T "${conf[STORAGE]}") != "btrfs" ]]; then
         panick "Backup storage is not on a btrfs partition!"
@@ -119,7 +126,7 @@ check_and_prepare () {
 
 list_snapshots () {
     local subvol=$1
-    btrfs sub show $1 \
+    $BTRFS sub show $1 \
         | awk 'f;/\tSnapshot\(s\):/{f=1}' \
         | while read s; do echo ${s##*/}; done \
         | sort -t_ -k2 -n
@@ -133,10 +140,10 @@ make_snapshot () {
     if [ $((${lastest_l_snap#L_}+${KEEP_SECONDS})) -lt $(date +%s) ] \
         && [ ${conf[KEEP_LONG_COUNT]} -gt 0 ]; then
         msg "Create long-live backup: %s" "L_$EPOCH"
-        btrfs subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/L_$EPOCH"
+        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/L_$EPOCH"
     else
         msg "Create short-live backup: %s" "S_$EPOCH"
-        btrfs subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/S_$EPOCH"
+        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/S_$EPOCH"
     fi
 }
 
@@ -146,14 +153,14 @@ clean_snapshots () {
         | head -n-${conf[KEEP_LONG_COUNT]} \
             | while read subvol; do
         msg "Delete old backup ${subvol}"
-        btrfs subvolume delete "${SYNC_TO}/${subvol}"
+        $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
     done
 
     # Clean short-time snapshots
     list_snapshots "$SYNC_TO_CURRENT" | grep "S_" | while read subvol; do
         if [ ${subvol#S_} -lt $((EPOCH-$KEEP_SECONDS)) ]; then
             msg "Delete old backup ${subvol}"
-            btrfs subvolume delete "${SYNC_TO}/${subvol}"
+            $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
         fi
     done
 }
@@ -162,8 +169,8 @@ clean_snapshots () {
 parse_profile 
 check_and_prepare
 
-rsync -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} --log-file "$RSYNC_LOG" \
-         "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "$SYNC_TO_CURRENT"
+$RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} --log-file "$RSYNC_LOG" \
+          "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "$SYNC_TO_CURRENT"
 
 make_snapshot
 clean_snapshots
