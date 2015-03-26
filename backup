@@ -6,6 +6,7 @@ BASEDIR="$(readlink -f $(dirname "$0"))"
 PROFILE="$1"
 readonly BASEDIR PROFILE
 
+
 panick () {
     local mesg=$1; shift
     printf "==> ERROR: ${mesg}\n" "$@" >&2
@@ -32,11 +33,11 @@ check_subvolume () {
 }
 
 check_storage () {
-    if [[ $(stat -f -c %T "$STORAGE") != "btrfs" ]]; then
+    if [[ $(stat -f -c %T "${conf[STORAGE]}") != "btrfs" ]]; then
         panick "Backup storage is not on a btrfs partition!"
     else
-        check_subvolume "$STORAGE/$PROFILE"
-        check_subvolume "$STORAGE/$PROFILE/current"
+        check_subvolume "${conf[STORAGE]}/$PROFILE"
+        check_subvolume "${conf[STORAGE]}/$PROFILE/current"
     fi
 }
 
@@ -56,52 +57,64 @@ list_s_snap () {
 }
 
 parse_profile () {
-    # common.conf: common config that applies to all backup profiles
-    [ -f "${BASEDIR}/common.conf" ] && . "${BASEDIR}/common.conf"
-    unset server srcdir
-
+    local common_conf="${BASEDIR}/common.conf"
     local profile_conf="${BASEDIR}/profiles/${PROFILE}.conf"
+    local demand_opts=('SERVER' 'USER' 'SRC' 'STORAGE')
+
+    declare -g -A conf
 
     if [ -f $profile_conf ]; then
-        source $profile_conf
+        while read line; do
+            local key=${line%%=*} value=${line#*=}
+            conf[$key]="$value"
+        done < <( \
+            [ -f "$common_conf" ] && cat "$common_conf" \
+            cat $profile_conf
+        )
 
-        if [ -z "$SERVER" ] ||  [ -z "$USER" ] || \
-           [ -z "$SRC" ] || [ -z "$STORAGE" ]; then
-            panick "Backup profile invalid!"
-        fi
+        for key in ${demand_opts[@]}; do
+            [ -z ${conf[$key]} ] && panick "Backup profile invalid!"
+        done
     else
         panick "Backup profile not found!"
     fi
 
-    SSH_KEY=${SSH_KEY:-"${BASEDIR}/keys/${USER}@${SERVER}"}
-    [ -f "$SSH_KEY" ] || panick "SSH key not found at ${SSH_KEY}!"
+    fallback_conf () {
+        local key=$1 value=$2
+        conf["$1"]=${conf["$1"]:-"$2"}
+    }
 
-    LOG_DIR=${LOG_DIR:-"${BASEDIR}/log/${PROFILE}/"}
-    mkdir -p $LOG_DIR
+    fallback_conf SSH_KEY "${BASEDIR}/keys/${conf[USER]}@${conf[SERVER]}"
+    [ -f "${conf["SSH_KEY"]}" ] || panick "SSH key not found!"
 
-    RSYNC_OPTS=${RSYNC_OPTS:-"-aHAX --timeout 3600 --delete"}
-    RSH_CMD=${RSH_CMD:-"ssh -i $SSH_KEY"}
+    fallback_conf LOG_DIR "${BASEDIR}/log/${PROFILE}/"
+    mkdir -p ${conf["LOG_DIR"]}
 
-    KEEP_DAYS=${KEEP_DAYS:-"30"}
-    KEEP_LONG_COUNT=${KEEP_LONG_COUNT:-"4"}
+    fallback_conf RSYNC_OPTS '-aHAX --timeout 3600 --delete'
+    fallback_conf RSH_CMD "ssh -i ${conf[SSH_KEY]}"
+    fallback_conf KEEP_DAYS 30
+    fallback_conf KEEP_LONG_COUNT 4
 }
 
 [[ $(whoami) != 'root' ]] && panick "Please run as root!"
+
 parse_profile 
 check_storage
 
-SYNC_TO="${STORAGE}/${PROFILE}"
+SYNC_TO="${conf[STORAGE]}/${PROFILE}"
 EPOCH=$(date +%s)
+KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
 
 # RSYNC from server~
-rsync -e "$RSH_CMD" $RSYNC_OPTS --log-file "${LOG_DIR}/rsync.log" \
-         "${USER}@${SERVER}:${SRC}/" "${SYNC_TO}/current/"
+rsync -e "${conf[RSH_CMD]}" ${conf[RSYNC_OPTS]} \
+      --log-file "${conf[LOG_DIR]}/rsync.log" \
+      "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "${SYNC_TO}/current/"
 
 # Create snapshot
 lastest_l_snap=$(list_l_snap "${SYNC_TO}/current" | tail -n1)
 lastest_l_snap=${lastest_l_snap:-"L_0"}
-if [ $((${lastest_l_snap#L_}+$((KEEP_DAYS*86400)))) -lt $EPOCH ] \
-        && [ $KEEP_LONG_COUNT -gt 0 ]; then
+if [ $((${lastest_l_snap#L_}+${KEEP_SECONDS})) -lt $EPOCH ] \
+        && [ ${conf[KEEP_LONG_COUNT]} -gt 0 ]; then
     btrfs subvol snapshot -r "${SYNC_TO}/current" "${SYNC_TO}/L_$EPOCH"
 else
     btrfs subvol snapshot -r "${SYNC_TO}/current" "${SYNC_TO}/S_$EPOCH"
@@ -109,7 +122,7 @@ fi
 
 # Clean long-time snapshots
 list_l_snap "${SYNC_TO}/current" \
-    | head -n-${KEEP_LONG_COUNT} \
+    | head -n-${conf[KEEP_LONG_COUNT]} \
         | while read subvol; do
     msg "Delete old backup ${subvol}."
     btrfs subvolume delete "${SYNC_TO}/${subvol}"
@@ -117,7 +130,7 @@ done
 
 # Clean short-time snapshots
 list_s_snap "${SYNC_TO}/current" | while read subvol; do
-    if [ ${subvol#S_} -lt $((EPOCH-$((KEEP_DAYS*86400)))) ]; then
+    if [ ${subvol#S_} -lt $((EPOCH-$KEEP_SECONDS)) ]; then
         msg "Delete old backup ${subvol}."
         btrfs subvolume delete "${SYNC_TO}/${subvol}"
     fi
