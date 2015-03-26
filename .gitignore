@@ -1,0 +1,7 @@
+/log
+
+/keys/*
+!/keys/backup@example.com
+
+/profiles/*
+!/profiles/example.conf
