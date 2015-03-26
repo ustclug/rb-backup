@@ -52,8 +52,10 @@ parse_profile () {
 
     if [ -f $profile_conf ]; then
         while read line; do
-            local key=${line%%=*} value=${line#*=}
-            conf[$key]="$value"
+            if [[ "$line" == ?*=?* ]] && ! [[ "$line" == \#* ]]; then
+                local key=${line%%=*} value=${line#*=}
+                conf[$key]="$value"
+            fi
         done < <( \
             [ -f "$common_conf" ] && cat "$common_conf"
             cat $profile_conf
