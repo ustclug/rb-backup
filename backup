@@ -6,13 +6,8 @@ BASEDIR="$(readlink -f $(dirname "$0"))"
 PROFILE="$1"
 EPOCH=$(date +%s)
 
-if [[ $(whoami) != 'root' ]]; then
-    BTRFS='sudo btrfs'
-    RSYNC='sudo rsync'
-else
-    BTRFS='btrfs'
-    RSYNC='sync'
-fi
+BTRFS='btrfs'
+RSYNC='rsync --fake-super'
 
 readonly BASEDIR PROFILE EPOCH BTRFS RSYNC
 
@@ -43,8 +38,8 @@ check_subvolume () {
     local subvol=$1
 
     if [ -d "$subvol" ]; then
-        $BTRFS subvol show $subvol >/dev/null 2>&1
-        if [ $? -ne 0 ]; then
+        local errmsg=$(LC_ALL=C btrfs subvolume show "$1" 2>&1 || true)
+        if [[ "$errmsg" == "ERROR: '"*"' is not a subvolume" ]]; then
             panick "$subvol exist but not a btrfs subvolume!"
         fi
     else
@@ -111,6 +106,8 @@ check_and_prepare () {
 
     if [[ $(stat -f -c %T "${conf[STORAGE]}") != "btrfs" ]]; then
         panick "Backup storage is not on a btrfs partition!"
+    elif [[ $(stat -c "%u" "${conf[STORAGE]}") != "$(id -u)" ]]; then
+        panick "Backup storage is not owned by you!"
     else
         local sync_to="${conf[STORAGE]}/${PROFILE}"
         check_subvolume "${sync_to}"
@@ -125,16 +122,16 @@ check_and_prepare () {
 }
 
 list_snapshots () {
-    local subvol=$1
-    $BTRFS sub show $1 \
-        | awk 'f;/\tSnapshot\(s\):/{f=1}' \
-        | while read s; do echo ${s##*/}; done \
+    local dir="$1"
+    local prefix="$2"
+
+    find "$dir" -mindepth 1 -maxdepth 1 -type d -readable \
+                -name "${prefix}*" -printf "%f\n" \
         | sort -t_ -k2 -n
 }
 
 make_snapshot () {
-    local lastest_l_snap=$(list_snapshots "$SYNC_TO_CURRENT" \
-                                | grep "^L_" | tail -n1)
+    local lastest_l_snap=$(list_snapshots "$SYNC_TO" L_ | tail -n1)
     lastest_l_snap=${lastest_l_snap:-"L_0"}
 
     if [ $((${lastest_l_snap#L_}+${KEEP_SECONDS})) -lt $(date +%s) ] \
@@ -149,23 +146,27 @@ make_snapshot () {
 
 clean_snapshots () {
     # Clean long-time snapshots
-    list_snapshots "$SYNC_TO_CURRENT" | grep "L_" \
-        | head -n-${conf[KEEP_LONG_COUNT]} \
-            | while read subvol; do
+    list_snapshots "$SYNC_TO" L_ | head -n-${conf[KEEP_LONG_COUNT]} \
+    | while read subvol; do
         msg "Delete old backup ${subvol}"
+        $BTRFS property set -ts  "${SYNC_TO}/${subvol}" ro false
         $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
     done
 
     # Clean short-time snapshots
-    list_snapshots "$SYNC_TO_CURRENT" | grep "S_" | while read subvol; do
+    list_snapshots "$SYNC_TO" S_ \
+    | while read subvol; do
         if [ ${subvol#S_} -lt $((EPOCH-$KEEP_SECONDS)) ]; then
             msg "Delete old backup ${subvol}"
+            $BTRFS property set -ts  "${SYNC_TO}/${subvol}" ro false
             $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
         fi
     done
 }
 
 # main {{{
+[ "$(whoami)" == root ] && panick "No root please :("
+
 parse_profile 
 check_and_prepare
 
