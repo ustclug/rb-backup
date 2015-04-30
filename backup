@@ -164,14 +164,27 @@ clean_snapshots () {
     done
 }
 
+do_rsync () {
+    set +e
+    $RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} --log-file "$RSYNC_LOG" \
+              "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "$SYNC_TO_CURRENT"
+    local ret=$?
+    set -e
+
+    for stat in 0 23 24 25; do
+        [[ $ret == $stat ]] && return 0
+    done
+
+    exit 1
+}
+
 # main {{{
 [ "$(whoami)" == root ] && panick "No root please :("
 
 parse_profile 
 check_and_prepare
 
-$RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} --log-file "$RSYNC_LOG" \
-          "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "$SYNC_TO_CURRENT"
+do_rsync
 
 make_snapshot
 clean_snapshots
