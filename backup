@@ -76,6 +76,7 @@ parse_profile () {
     fallback_conf SSH_KEY "${BASEDIR}/keys/${conf[USER]}@${conf[SERVER]}"
     fallback_conf LOG_DIR "${BASEDIR}/log/${PROFILE}/"
     fallback_conf RSYNC_OPTS '-aHAX --timeout 3600 --delete'
+    fallback_conf RSYNC_EXCLUDE '--exclude=/lost+found'
     fallback_conf KEEP_DAYS 30
     fallback_conf KEEP_LONG_COUNT 4
 }
@@ -166,8 +167,11 @@ clean_snapshots () {
 
 do_rsync () {
     set +e
-    $RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} --log-file "$RSYNC_LOG" \
-              "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" "$SYNC_TO_CURRENT"
+    $RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} \
+           --log-file "$RSYNC_LOG" \
+           ${conf[RSYNC_EXCLUDE]} \
+           "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" \
+           "$SYNC_TO_CURRENT"
     local ret=$?
     set -e
 
