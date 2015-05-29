@@ -19,7 +19,7 @@
 配置文件中有用的变量有：
 * `SERVER`: 必需，Client 的地址或域名
 * `USER`: 必需，SSH 登录 Client 的用户名
-* `SRC`: 必需，Client 上要备份文件的路径
+* `SRC`: 必需，Client 上要备份文件的路径，可以重复设置多次，以设置同步多个路径
 * `STORAGE`: 必需，建议放在全局配置中，Server 上存放备份文件的本地文件夹，必须在 btrfs 分区上，且执行该脚本的用户可以读写
 * `LOG_DIR`: 存放日志的目录（默认是 `log/<profile name>` ）
 * `SSH_KEY`: SSH 登录用的私钥（默认是 `keys/${USER}@${SERVER}`），该文件必须存在

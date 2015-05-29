@@ -54,11 +54,16 @@ parse_profile () {
 
     declare -g -A conf
 
+    confSRC=()
     if [ -f $profile_conf ]; then
         while read line; do
             if [[ "$line" == ?*=?* ]] && ! [[ "$line" == \#* ]]; then
                 local key=${line%%=*} value=${line#*=}
-                conf[$key]="$value"
+                if [[ "$key" == "SRC" ]]; then
+                    confSRC+=("$value")
+                else
+                    conf[$key]="$value"
+                fi
             fi
         done < <( \
             [ -f "$common_conf" ] && cat "$common_conf"
@@ -97,7 +102,8 @@ check_and_prepare () {
     init_log ${conf["LOG_DIR"]}
 
     # these variable are demanded and no fallback
-    for key in 'SERVER' 'USER' 'SRC' 'STORAGE'; do
+    [ -z $confSRC ] && panick "No SRC specified!"
+    for key in 'SERVER' 'USER' 'STORAGE'; do
         [ -z ${conf[$key]} ] && panick "Backup profile invalid!"
     done
 
@@ -165,21 +171,38 @@ clean_snapshots () {
     done
 }
 
-do_rsync () {
-    set +e
+do_rsync_atom () {
+    local src=$1
+
     $RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} \
            --log-file "$RSYNC_LOG" \
            ${conf[RSYNC_EXCLUDE]} \
-           "${conf[USER]}@${conf[SERVER]}:${conf[SRC]}/" \
+           "${conf[USER]}@${conf[SERVER]}:${src}" \
            "$SYNC_TO_CURRENT"
     local ret=$?
-    set -e
 
     for stat in 0 23 24 25; do
         [[ $ret == $stat ]] && return 0
     done
 
-    exit 1
+    return 1
+}
+
+do_rsync () {
+    local success=0
+
+    set +e
+    if [[ ${#confSRC[@]} == 1 ]]; then
+        do_rsync_atom "${confSRC[0]}/" && success=$((success+1))
+    else
+        for SRC in ${confSRC[@]}; do
+            do_rsync_atom "${SRC%/}" && success=$((success+1))
+        done
+    fi
+    set -e
+
+    [[ $success == 0 ]] && panick "Failed to backup :("
+    return 0
 }
 
 # main {{{
