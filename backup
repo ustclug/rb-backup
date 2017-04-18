@@ -4,6 +4,7 @@ set -e
 
 BASEDIR="$(readlink -f $(dirname "$0"))"
 PROFILE="$1"
+ACTION="${2:-backup}"
 EPOCH=$(date +%s)
 
 BTRFS='btrfs'
@@ -84,6 +85,12 @@ parse_profile () {
     fallback_conf RSYNC_EXCLUDE '--exclude=/lost+found'
     fallback_conf KEEP_DAYS 30
     fallback_conf KEEP_LONG_COUNT 4
+
+    # some shortcut global variables
+    SYNC_TO="${conf[STORAGE]}/${PROFILE}"
+    RSH_OPTS="ssh -i ${conf[SSH_KEY]}"
+    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
+    SYNC_TO_CURRENT="${SYNC_TO}/current"
 }
 
 init_log () {
@@ -116,16 +123,9 @@ check_and_prepare () {
     elif [[ $(stat -c "%u" "${conf[STORAGE]}") != "$(id -u)" ]]; then
         panick "Backup storage is not owned by you!"
     else
-        local sync_to="${conf[STORAGE]}/${PROFILE}"
-        check_subvolume "${sync_to}"
-        check_subvolume "${sync_to}/current"
+        check_subvolume "${SYNC_TO}"
+        check_subvolume "${SYNC_TO}/current"
     fi
-
-    # some shortcut global variables
-    RSH_OPTS="ssh -i ${conf[SSH_KEY]}"
-    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
-    SYNC_TO="$sync_to"
-    SYNC_TO_CURRENT="${sync_to}/current"
 }
 
 list_snapshots () {
@@ -209,11 +209,20 @@ do_rsync () {
 [ "$(whoami)" == root ] && panick "No root please :("
 
 parse_profile 
-check_and_prepare
 
-do_rsync
-
-make_snapshot
-clean_snapshots
+case "$ACTION" in
+    backup)
+        check_and_prepare
+        do_rsync
+        make_snapshot
+        clean_snapshots
+        ;;
+    list)
+        echo "$SYNC_TO"
+        list_snapshots "$SYNC_TO" "" | sed 's_^_  _'
+        ;;
+    *)
+        panick "Unknown action: $ACTION"
+esac
 # }}}
 
