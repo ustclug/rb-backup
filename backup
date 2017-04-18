@@ -5,12 +5,13 @@ set -e
 BASEDIR="$(readlink -f $(dirname "$0"))"
 PROFILE="$1"
 ACTION="${2:-backup}"
-EPOCH=$(date +%s)
+EPOCH=$(date +%10s)
+ISO_TIME="$(date --date=@$EPOCH --iso-8601=seconds)"
 
 BTRFS='btrfs'
 RSYNC='rsync --fake-super'
 
-readonly BASEDIR PROFILE EPOCH BTRFS RSYNC
+readonly BASEDIR PROFILE EPOCH ISO_TIME BTRFS RSYNC
 
 # log-related functions {{{
 log () {
@@ -79,28 +80,38 @@ parse_profile () {
         conf["$1"]=${conf["$1"]:-"$2"}
     }
 
+
     fallback_conf SSH_KEY "${BASEDIR}/keys/${conf[USER]}@${conf[SERVER]}"
     fallback_conf LOG_DIR "${BASEDIR}/log/${PROFILE}/"
     fallback_conf RSYNC_OPTS '-aHAX --timeout 3600 --delete'
     fallback_conf RSYNC_EXCLUDE '--exclude=/lost+found'
     fallback_conf KEEP_DAYS 30
     fallback_conf KEEP_LONG_COUNT 4
+    fallback_conf USE_ISO_TIME 0
 
     # some shortcut global variables
     SYNC_TO="${conf[STORAGE]}/${PROFILE}"
     RSH_OPTS="ssh -i ${conf[SSH_KEY]}"
     KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
     SYNC_TO_CURRENT="${SYNC_TO}/current"
+
+    if (( "${conf[USE_ISO_TIME]}" == 0 )); then
+        TIMESTAMP=$EPOCH
+        SHORT_DDL=$((EPOCH-KEEP_SECONDS))
+    else
+        TIMESTAMP=$ISO_TIME
+        SHORT_DDL=$(date --date=@$((EPOCH-KEEP_SECONDS)) --iso-8601=seconds)
+    fi
 }
 
 init_log () {
     local log_dir=$1
 
-    GLOBAL_LOG="${log_dir}/backup.log.${EPOCH}"
-    RSYNC_LOG="${log_dir}/rsync.log.${EPOCH}"
+    GLOBAL_LOG="${log_dir}/backup.log.${TIMESTAMP}"
+    RSYNC_LOG="${log_dir}/rsync.log.${TIMESTAMP}"
 
     touch "$GLOBAL_LOG"
-    log "Script start at %s" "$(date --date=@$EPOCH --iso-8601=seconds)"
+    log "Script start at %s" "$ISO_TIME"
 }
 
 check_and_prepare () {
@@ -139,15 +150,17 @@ list_snapshots () {
 
 make_snapshot () {
     local lastest_l_snap=$(list_snapshots "$SYNC_TO" L_ | tail -n1)
-    lastest_l_snap=${lastest_l_snap:-"L_0"}
+    lastest_l_snap=${lastest_l_snap:-"L_0000000000"}
+    local old_epoch=${lastest_l_snap#L_}
 
-    if [ $((${lastest_l_snap#L_}+${KEEP_SECONDS})) -lt $(date +%s) ] \
-        && [ ${conf[KEEP_LONG_COUNT]} -gt 0 ]; then
-        msg "Create long-live backup: %s" "L_$EPOCH"
-        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/L_$EPOCH"
+    # NOTE: [[ ]] does alphabetical compare on string
+    if [[ "${old_epoch}" < "${SHORT_DDL}" ]] \
+        && (( ${conf[KEEP_LONG_COUNT]} > 0 )); then
+        msg "Create long-live backup: %s" "L_$TIMESTAMP"
+        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/L_$TIMESTAMP"
     else
-        msg "Create short-live backup: %s" "S_$EPOCH"
-        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/S_$EPOCH"
+        msg "Create short-live backup: %s" "S_$TIMESTAMP"
+        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/S_$TIMESTAMP"
     fi
 }
 
@@ -160,10 +173,11 @@ clean_snapshots () {
         $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
     done
 
+
     # Clean short-time snapshots
     list_snapshots "$SYNC_TO" S_ \
     | while read subvol; do
-        if [ ${subvol#S_} -lt $((EPOCH-$KEEP_SECONDS)) ]; then
+        if [[ "${subvol#S_}" < "$SHORT_DDL" ]]; then
             msg "Delete old backup ${subvol}"
             $BTRFS property set -ts  "${SYNC_TO}/${subvol}" ro false
             $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
