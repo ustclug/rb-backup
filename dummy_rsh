@@ -1,0 +1,12 @@
+#!/bin/bash
+
+WHO=""
+
+while (( $# > 0 )); do
+    [[ "$1" == "-l" ]] && WHO="$2"
+    [[ "$1" == "PLACE_HOLDER" ]] && break
+    shift
+done
+
+shift
+sudo -u "$WHO" "$@"

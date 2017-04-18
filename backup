@@ -89,11 +89,19 @@ parse_profile () {
     fallback_conf KEEP_LONG_COUNT 4
     fallback_conf USE_ISO_TIME 0
 
+
     # some shortcut global variables
     SYNC_TO="${conf[STORAGE]}/${PROFILE}"
-    RSH_OPTS="ssh -i ${conf[SSH_KEY]}"
     KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
     SYNC_TO_CURRENT="${SYNC_TO}/current"
+
+    if [[ -n "${conf[SERVER]}" ]]; then
+        RSH_OPTS="ssh -i '${conf[SSH_KEY]}'"
+    else
+        conf[SERVER]="PLACE_HOLDER"
+        conf[SSH_KEY]="/etc/passwd"  # a dirty trick to fool existence check
+        RSH_OPTS="/bin/bash $BASEDIR/dummy_rsh"
+    fi
 
     if (( "${conf[USE_ISO_TIME]}" == 0 )); then
         TIMESTAMP=$EPOCH
