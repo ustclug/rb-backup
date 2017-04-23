@@ -2,16 +2,14 @@
 
 set -e
 
-BASEDIR="$(readlink -f $(dirname "$0"))"
-PROFILE="$1"
-ACTION="${2:-backup}"
-EPOCH=$(date +%10s)
-ISO_TIME="$(date --date=@$EPOCH --iso-8601=seconds)"
+readonly BASEDIR="$(readlink -f $(dirname "$0"))"
+readonly PROFILE="$1"
+readonly ACTION="${2:-backup}"
+readonly EPOCH=$(date +%10s)
+readonly ISO_TIME="$(date --date=@$EPOCH --iso-8601=seconds)"
 
-BTRFS='btrfs'
-RSYNC='rsync'
-
-readonly BASEDIR PROFILE EPOCH ISO_TIME BTRFS RSYNC
+readonly BTRFS='btrfs'
+readonly RSYNC='rsync'
 
 
 # log-related functions {{{
@@ -91,20 +89,6 @@ delete_snapshot() {
 # }}}
 
 
-check_subvolume () {
-    local subvol=$1
-
-    if [ -d "$subvol" ]; then
-        local errmsg=$(LC_ALL=C btrfs subvolume show "$1" 2>&1 || true)
-        if [[ "$errmsg" == "ERROR: '"*"' is not a subvolume" ]]; then
-            panick "$subvol exist but not a btrfs subvolume!"
-        fi
-    else
-        $BTRFS subvol create $subvol \
-            || panick "Failed to create subvolume $subvol"
-    fi
-}
-
 parse_profile () {
     local common_conf="${BASEDIR}/common.conf"
     local profile_conf="${BASEDIR}/profiles/${PROFILE}.conf"
@@ -146,10 +130,10 @@ parse_profile () {
 
     # some shortcut global variables
     SYNC_TO="${conf[STORAGE]}/${PROFILE}"
-    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
     SYNC_CURRENT="${SYNC_TO}/current"
     SYNC_LAST="${SYNC_TO}/.lastsync"
     SYNC_TRASHBIN="${SYNC_TO}/.trashbin"
+    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
 
     if [[ -n "${conf[SERVER]}" ]]; then
         RSH_OPTS="ssh -i '${conf[SSH_KEY]}'"
@@ -167,6 +151,8 @@ parse_profile () {
         SHORT_DDL=$(date --date=@$((EPOCH-KEEP_SECONDS)) --iso-8601=seconds)
     fi
 
+    readonly SYNC_TO SYNC_CURRENT SYNC_LAST SYNC_TRASHBIN KEEP_SECONDS \
+             RSH_OPTS TIMESTAMP SHORT_DDL conf confSRC
 
     # check missing options
     [ -z $confSRC ] && panick "No SRC specified!"
@@ -176,15 +162,15 @@ parse_profile () {
         [ -z ${conf[$key]} ] && panick "Backup profile invalid!"
     done
 
-    return 0  # ???
+    return 0  # eliminate retval of test -z
 }
 
 
 init_log () {
     [ -d ${conf["LOG_DIR"]} ] || mkdir ${conf["LOG_DIR"]}
 
-    GLOBAL_LOG="${conf["LOG_DIR"]}/backup.log.${TIMESTAMP}"
-    RSYNC_LOG="${conf["LOG_DIR"]}/rsync.log.${TIMESTAMP}"
+    readonly GLOBAL_LOG="${conf["LOG_DIR"]}/backup.log.${TIMESTAMP}"
+    readonly RSYNC_LOG="${conf["LOG_DIR"]}/rsync.log.${TIMESTAMP}"
 
     touch "$GLOBAL_LOG"
     log "Script start at %s" "$ISO_TIME"
@@ -211,6 +197,7 @@ prepare_storage() {
     fi
 }
 
+
 rsync_wrapper () {
     local src="$1"
     local base_opts="--fake-super"
@@ -234,6 +221,7 @@ rsync_wrapper () {
     return 1
 }
 
+
 do_sync () {
     local success=0
 
@@ -251,6 +239,7 @@ do_sync () {
     return 0
 }
 
+
 list_snap () {
     local dir="$1"
     local prefix="$2"
@@ -259,6 +248,7 @@ list_snap () {
                 -name "${prefix}*" -printf "%f\n" \
         | sort -t_ -k2 -n
 }
+
 
 do_snap () {
     local lastest_l_snap=$(list_snap "$SYNC_TO" L_ | tail -n1)
@@ -277,6 +267,7 @@ do_snap () {
         ln -srnf "${SYNC_TO}/S_$TIMESTAMP" "$SYNC_LAST"
     fi
 }
+
 
 clean_snap () {
     # Clean long-time snapshots
