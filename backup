@@ -83,7 +83,8 @@ delete_snapshot() {
         fi
 
         mv "$path" "$SYNC_TRASHBIN"
-        rm -rf $SYNC_TRASHBIN
+        rm -rf "$SYNC_TRASHBIN"
+        mkdir -p "$SYNC_TRASHBIN"
     fi
 }
 # }}}
