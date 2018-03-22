@@ -26,6 +26,7 @@
 * `KEEP_DAYS`: 短期备份的保留天数（默认为 30）
 * `KEEP_LONG_COUNT`: 最多保留多少长期备份（默认为 4）
 * `RSYNC_OPTS`: RSYNC 同步参数（默认值为 `-aHAX --timeout 3600 --delete`）
+* `USE_ISO_TIME`: 是否使用 ISO-8601 格式作为 snapshot 和日志文件名中的时间戳（默认值为 0，使用 UNIX 时间戳）
 
 备份时，执行：
 ```
@@ -40,9 +41,9 @@
 
 第一次使用时，脚本会在上述文件夹下创建名为 `current` 的 btrfs subvolume。以后每次执行同步，脚本都会用 rsync 把最新的备份文件同步进这个 subvolume。
 
-每次成功执行完 rsync 后，脚本就会为 `current` 目录创建一个只读的 snapshot，名为 `L_<epoch>` 或 `S_<epoch>`，其中 `<epoch>` 代表备份文件时的 UNIX 时间。
-* `S_<epoch>` 是一个短期备份，过了 `${KEEP_DAYS}` 天就会被删除。
-* `L_<epoch>` 是一个长期备份，每隔 `${KEEP_DAYS}` 会创建一个。同时会保留 `${KEEP_LONG_COUNT}` 个长期备份，旧的会被删除。
+每次成功执行完 rsync 后，脚本就会为 `current` 目录创建一个只读的 snapshot，名为 `L_<epoch>` 或 `S_<epoch>`，其中 `<timestamp>` 代表备份文件时的时间。
+* `S_<timestamp>` 是一个短期备份，过了 `${KEEP_DAYS}` 天就会被删除。
+* `L_<timestamp>` 是一个长期备份，每隔 `${KEEP_DAYS}` 会创建一个。同时会保留 `${KEEP_LONG_COUNT}` 个长期备份，旧的会被删除。
 
 注意，btrfs 默认挂载参数不允许普通用户删除 subvolume。必须加上 `user_subvol_rm_allowed` 参数才行。
 

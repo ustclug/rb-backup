@@ -2,14 +2,15 @@
 
 set -e
 
-BASEDIR="$(readlink -f $(dirname "$0"))"
-PROFILE="$1"
-EPOCH=$(date +%s)
+readonly BASEDIR="$(readlink -f $(dirname "$0"))"
+readonly PROFILE="$1"
+readonly ACTION="${2:-backup}"
+readonly EPOCH=$(date +%10s)
+readonly ISO_TIME="$(date --date=@$EPOCH --iso-8601=seconds)"
 
-BTRFS='btrfs'
-RSYNC='rsync --fake-super'
+readonly BTRFS='btrfs'
+readonly RSYNC='rsync'
 
-readonly BASEDIR PROFILE EPOCH BTRFS RSYNC
 
 # log-related functions {{{
 log () {
@@ -34,19 +35,60 @@ msg() {
 }
 # }}}
 
-check_subvolume () {
-    local subvol=$1
 
-    if [ -d "$subvol" ]; then
-        local errmsg=$(LC_ALL=C btrfs subvolume show "$1" 2>&1 || true)
-        if [[ "$errmsg" == "ERROR: '"*"' is not a subvolume" ]]; then
-            panick "$subvol exist but not a btrfs subvolume!"
-        fi
+# "snapshot"-related functions {{{
+test_same_fs() {
+    local lastdev=$(stat --printf '%d' "$1")
+    shift
+
+    for var in "$@"; do
+        local dev=$(stat --printf '%d' "$var")
+        [[ "$dev" != "$lastdev" ]] && return -1
+        lastdev="$dev"
+    done
+
+    return 0
+}
+
+take_snapshot() {
+    local src="$1"
+    local dst="$2"
+
+    if [[ "$FSTYPE" == "btrfs" ]]; then
+        $BTRFS subvol snapshot -r "$src" "$dst"
     else
-        $BTRFS subvol create $subvol \
-            || panick "Failed to create subvolume $subvol"
+        mv "$src" "$dst"
     fi
 }
+
+create_subvol() {
+    local path="$1"
+
+    if [[ "$FSTYPE" == "btrfs" ]]; then
+        $BTRFS subvol create "$path"
+    else
+        mkdir -p "$path"
+    fi
+}
+
+delete_snapshot() {
+    local path="$1"
+
+    if [[ "$FSTYPE" == "btrfs" ]]; then
+        $BTRFS property set -ts "${path}" ro false
+        $BTRFS subvol delete "$path"
+    else
+        if ! test_same_fs "$SYNC_TRASHBIN" "$path"; then
+            panick "$SYNC_TRASHBIN and $path are not in the same directory"
+        fi
+
+        mv "$path" "$SYNC_TRASHBIN"
+        rm -rf "$SYNC_TRASHBIN"
+        mkdir -p "$SYNC_TRASHBIN"
+    fi
+}
+# }}}
+
 
 parse_profile () {
     local common_conf="${BASEDIR}/common.conf"
@@ -84,101 +126,93 @@ parse_profile () {
     fallback_conf RSYNC_EXCLUDE '--exclude=/lost+found'
     fallback_conf KEEP_DAYS 30
     fallback_conf KEEP_LONG_COUNT 4
-}
+    fallback_conf USE_ISO_TIME 0
 
-init_log () {
-    local log_dir=$1
 
-    GLOBAL_LOG="${log_dir}/backup.log.${EPOCH}"
-    RSYNC_LOG="${log_dir}/rsync.log.${EPOCH}"
+    # some shortcut global variables
+    SYNC_TO="${conf[STORAGE]}/${PROFILE}"
+    SYNC_CURRENT="${SYNC_TO}/current"
+    SYNC_LAST="${SYNC_TO}/.lastsync"
+    SYNC_TRASHBIN="${SYNC_TO}/.trashbin"
+    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
 
-    touch "$GLOBAL_LOG"
-    log "Script start at %s" "$(date --date=@$EPOCH --iso-8601=seconds)"
-}
+    if [[ -n "${conf[SERVER]}" ]]; then
+        RSH_OPTS="ssh -i '${conf[SSH_KEY]}'"
+    else
+        conf[SERVER]="PLACE_HOLDER"
+        conf[SSH_KEY]="/etc/passwd"  # a dirty trick to fool existence check
+        RSH_OPTS="/bin/bash $BASEDIR/dummy_rsh"
+    fi
 
-check_and_prepare () {
-    # initialize log
-    [ -d ${conf["LOG_DIR"]} ] || mkdir ${conf["LOG_DIR"]}
-    init_log ${conf["LOG_DIR"]}
+    if (( "${conf[USE_ISO_TIME]}" == 0 )); then
+        TIMESTAMP=$EPOCH
+        SHORT_DDL=$((EPOCH-KEEP_SECONDS))
+    else
+        TIMESTAMP=$ISO_TIME
+        SHORT_DDL=$(date --date=@$((EPOCH-KEEP_SECONDS)) --iso-8601=seconds)
+    fi
 
-    # these variable are demanded and no fallback
+    readonly SYNC_TO SYNC_CURRENT SYNC_LAST SYNC_TRASHBIN KEEP_SECONDS \
+             RSH_OPTS TIMESTAMP SHORT_DDL conf confSRC
+
+    # check missing options
     [ -z $confSRC ] && panick "No SRC specified!"
+    [ -f "${conf["SSH_KEY"]}" ] || panick "SSH key not found!"
+
     for key in 'SERVER' 'USER' 'STORAGE'; do
         [ -z ${conf[$key]} ] && panick "Backup profile invalid!"
     done
 
-    # SSH key must be provided to login remote
-    [ -f "${conf["SSH_KEY"]}" ] || panick "SSH key not found!"
+    return 0  # eliminate retval of test -z
+}
 
 
-    if [[ $(stat -f -c %T "${conf[STORAGE]}") != "btrfs" ]]; then
-        panick "Backup storage is not on a btrfs partition!"
-    elif [[ $(stat -c "%u" "${conf[STORAGE]}") != "$(id -u)" ]]; then
+init_log () {
+    [ -d ${conf["LOG_DIR"]} ] || mkdir ${conf["LOG_DIR"]}
+
+    readonly GLOBAL_LOG="${conf["LOG_DIR"]}/backup.log.${TIMESTAMP}"
+    readonly RSYNC_LOG="${conf["LOG_DIR"]}/rsync.log.${TIMESTAMP}"
+
+    touch "$GLOBAL_LOG"
+    log "Script start at %s" "$ISO_TIME"
+}
+
+
+prepare_storage() {
+    # detect storage filesystem type
+    readonly FSTYPE=$(stat -fc "%T" "${conf[STORAGE]}")
+    msg "Storage filesystem is $FSTYPE"
+
+    # check permission of the storage
+    if [[ $(stat -c "%u" "${conf[STORAGE]}") != "$(id -u)" ]]; then
         panick "Backup storage is not owned by you!"
-    else
-        local sync_to="${conf[STORAGE]}/${PROFILE}"
-        check_subvolume "${sync_to}"
-        check_subvolume "${sync_to}/current"
+    elif ! touch "${conf[STORAGE]}/.rb-backup"; then
+        panick "Cannot create files in ${conf[STORAGE]}"
     fi
 
-    # some shortcut global variables
-    RSH_OPTS="ssh -i ${conf[SSH_KEY]}"
-    KEEP_SECONDS="$((conf[KEEP_DAYS]*86400))"
-    SYNC_TO="$sync_to"
-    SYNC_TO_CURRENT="${sync_to}/current"
-}
+    [ -d "$SYNC_TO" ] || create_subvol "$SYNC_TO"
+    [ -d "$SYNC_CURRENT" ] || create_subvol "$SYNC_CURRENT"
 
-list_snapshots () {
-    local dir="$1"
-    local prefix="$2"
-
-    find "$dir" -mindepth 1 -maxdepth 1 -type d -readable \
-                -name "${prefix}*" -printf "%f\n" \
-        | sort -t_ -k2 -n
-}
-
-make_snapshot () {
-    local lastest_l_snap=$(list_snapshots "$SYNC_TO" L_ | tail -n1)
-    lastest_l_snap=${lastest_l_snap:-"L_0"}
-
-    if [ $((${lastest_l_snap#L_}+${KEEP_SECONDS})) -lt $(date +%s) ] \
-        && [ ${conf[KEEP_LONG_COUNT]} -gt 0 ]; then
-        msg "Create long-live backup: %s" "L_$EPOCH"
-        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/L_$EPOCH"
-    else
-        msg "Create short-live backup: %s" "S_$EPOCH"
-        $BTRFS subvol snapshot -r "$SYNC_TO_CURRENT" "${SYNC_TO}/S_$EPOCH"
+    if [[ "$FSTYPE" != "btrfs" ]]; then
+        [ -d "$SYNC_TRASHBIN" ] || create_subvol "$SYNC_TRASHBIN"
     fi
 }
 
-clean_snapshots () {
-    # Clean long-time snapshots
-    list_snapshots "$SYNC_TO" L_ | head -n-${conf[KEEP_LONG_COUNT]} \
-    | while read subvol; do
-        msg "Delete old backup ${subvol}"
-        $BTRFS property set -ts  "${SYNC_TO}/${subvol}" ro false
-        $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
-    done
 
-    # Clean short-time snapshots
-    list_snapshots "$SYNC_TO" S_ \
-    | while read subvol; do
-        if [ ${subvol#S_} -lt $((EPOCH-$KEEP_SECONDS)) ]; then
-            msg "Delete old backup ${subvol}"
-            $BTRFS property set -ts  "${SYNC_TO}/${subvol}" ro false
-            $BTRFS subvolume delete "${SYNC_TO}/${subvol}"
-        fi
-    done
-}
+rsync_wrapper () {
+    local src="$1"
+    local base_opts="--fake-super"
+    
+    if [[ "$FSTYPE" != btrfs ]] && [ -e "$SYNC_LAST" ]; then
+        base_opts="$base_opts --link-dest=$SYNC_LAST"
+    fi
 
-do_rsync_atom () {
-    local src=$1
-
-    $RSYNC -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} \
+    $RSYNC $base_opts \
+           -e "$RSH_OPTS" ${conf[RSYNC_OPTS]} \
            --log-file "$RSYNC_LOG" \
            ${conf[RSYNC_EXCLUDE]} \
            "${conf[USER]}@${conf[SERVER]}:${src}" \
-           "$SYNC_TO_CURRENT"
+           "$SYNC_CURRENT"
     local ret=$?
 
     for stat in 0 23 24 25; do
@@ -188,15 +222,16 @@ do_rsync_atom () {
     return 1
 }
 
-do_rsync () {
+
+do_sync () {
     local success=0
 
     set +e
     if [[ ${#confSRC[@]} == 1 ]]; then
-        do_rsync_atom "${confSRC[0]}/" && success=$((success+1))
+        rsync_wrapper "${confSRC[0]}/" && success=$((success+1))
     else
         for SRC in ${confSRC[@]}; do
-            do_rsync_atom "${SRC%/}" && success=$((success+1))
+            rsync_wrapper "${SRC%/}" && success=$((success+1))
         done
     fi
     set -e
@@ -205,15 +240,73 @@ do_rsync () {
     return 0
 }
 
+
+list_snap () {
+    local dir="$1"
+    local prefix="$2"
+
+    find "$dir" -mindepth 1 -maxdepth 1 -type d -readable \
+                -name "${prefix}*" -printf "%f\n" \
+        | sort -t_ -k2 -n
+}
+
+
+do_snap () {
+    local lastest_l_snap=$(list_snap "$SYNC_TO" L_ | tail -n1)
+    lastest_l_snap=${lastest_l_snap:-"L_0000000000"}
+    local old_epoch=${lastest_l_snap#L_}
+
+    # NOTE: [[ ]] does alphabetical compare on string
+    if [[ "${old_epoch}" < "${SHORT_DDL}" ]] \
+            && (( ${conf[KEEP_LONG_COUNT]} > 0 )); then
+        msg "Create long-live backup: %s" "L_$TIMESTAMP"
+        take_snapshot "$SYNC_CURRENT" "${SYNC_TO}/L_$TIMESTAMP"
+        ln -srnf "${SYNC_TO}/L_$TIMESTAMP" "$SYNC_LAST"
+    else
+        msg "Create short-live backup: %s" "S_$TIMESTAMP"
+        take_snapshot "$SYNC_CURRENT" "${SYNC_TO}/S_$TIMESTAMP"
+        ln -srnf "${SYNC_TO}/S_$TIMESTAMP" "$SYNC_LAST"
+    fi
+}
+
+
+clean_snap () {
+    # Clean long-time snapshots
+    list_snap "$SYNC_TO" L_ | head -n-${conf[KEEP_LONG_COUNT]} \
+    | while read subvol; do
+        msg "Delete old backup ${subvol}"
+        delete_snapshot "${SYNC_TO}/${subvol}"
+    done
+
+    # Clean short-time snapshots
+    list_snap "$SYNC_TO" S_ \
+    | while read subvol; do
+        if [[ "${subvol#S_}" < "$SHORT_DDL" ]]; then
+            msg "Delete old backup ${subvol}"
+            delete_snapshot "${SYNC_TO}/${subvol}"
+        fi
+    done
+}
+
+
 # main {{{
 [ "$(whoami)" == root ] && panick "No root please :("
 
 parse_profile 
-check_and_prepare
 
-do_rsync
-
-make_snapshot
-clean_snapshots
+case "$ACTION" in
+    backup)
+        prepare_storage
+        init_log
+        do_sync
+        do_snap
+        clean_snap
+        ;;
+    list)
+        echo "$SYNC_TO"
+        list_snap "$SYNC_TO" "" | sed 's_^_  _'
+        ;;
+    *)
+        panick "Unknown action: $ACTION"
+esac
 # }}}
-
